@@ -10,7 +10,7 @@ import io
 st.set_page_config(page_title="PDF 사업명 & 쪽 번호 정밀 추출기", page_icon="📊", layout="wide")
 
 st.title("📊 PDF 사업명 & 쪽 번호 정밀 추출기")
-st.caption("설정한 글자 크기(Font Size) 이상이거나, 키워드/기호 조건에 해당하면 모두 정밀 추출합니다.")
+st.caption("설정한 글자 크기(Font Size) 이상이면서 괄호()가 포함된 제목 또는 키워드 조건을 정밀 추출합니다.")
 
 # ---------------------------------------------------------
 # Excel 파일 생성 함수
@@ -29,12 +29,12 @@ def create_excel_file(df):
     return output.getvalue()
 
 # ---------------------------------------------------------
-# 하이브리드 파싱 함수 (글자 크기 이상 OR 당초 키워드/기호 조건)
+# 하이브리드 파싱 함수 (글자 크기 이상 AND 괄호 포함 OR 당초 키워드)
 # ---------------------------------------------------------
 def parse_pdf_titles_hybrid(pdf_bytes, x_start, x_end, page_y_start, page_y_end, title_y_start, title_y_end, min_font_size):
     results = []
     
-    # 키워드 목록
+    # 예산 키워드 정규식 목록
     keywords = [
         r'신규\s*[\/\,]\s*전환\s*사업', r'계속\s*[\/\,]\s*전환\s*사업',
         r'신규\s*[\/\,]\s*전환', r'계속\s*[\/\,]\s*전환', r'전환\s*사업', r'전환사업', r'전환',
@@ -42,13 +42,11 @@ def parse_pdf_titles_hybrid(pdf_bytes, x_start, x_end, page_y_start, page_y_end,
         r'계속\s*[\/\,]\s*소멸\s*기금', r'계속\s*[\/\,]\s*소멸',
         r'소멸\s*기금', r'소멸기금', r'계속', r'신규', r'소멸', r'자체', r'보조'
     ]
-    # [수정] \vert{} 문법 오류를 올바른 | (OR) 정규식으로 수정
     pattern_str = r'[\(\[\<]\s*(' + '|'.join(keywords) + r')\s*[\)\]\>]'
     keyword_pattern = re.compile(pattern_str)
 
     visited_titles = set()
 
-    # [수정] io.BytesIO를 통해 어느 환경에서나 안전하게 PDF 오픈
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for pdf_page_idx, page in enumerate(pdf.pages):
             pw, ph = page.width, page.height
@@ -66,7 +64,6 @@ def parse_pdf_titles_hybrid(pdf_bytes, x_start, x_end, page_y_start, page_y_end,
             except Exception:
                 page_crop_text = ""
             
-            # [수정] 쪽 번호 추출 정규식 이스케이프 오류 수정
             page_match = re.search(r'(?:-\s*|\[)?(\d{1,4})(?:\s*-\s*|\])?', page_crop_text)
             detected_page = int(page_match.group(1)) if page_match else (pdf_page_idx + 1)
 
@@ -103,14 +100,22 @@ def parse_pdf_titles_hybrid(pdf_bytes, x_start, x_end, page_y_start, page_y_end,
                 
                 line_max_font = lines_max_size.get(top_key, 0)
                 
-                # [판정 조건 A] 지정한 글자 크기 이상인 경우
+                # ---------------------------------------------------------
+                # [수정된 판정 로직]
+                # ---------------------------------------------------------
+                # 1. 반각 () 및 전각 （） 괄호 포함 여부
+                has_parentheses = ('(' in formatted_line and ')' in formatted_line) or ('（' in formatted_line and '）' in formatted_line)
+                
+                # 2. 지정 글자 크기(기본 20pt) 이상 여부
                 is_large_enough = (line_max_font >= min_font_size)
                 
-                # [판정 조건 B] 키워드 또는 괄호/기호 조건
+                # 3. 예산 키워드 패턴 포함 여부
                 is_keyword_matched = bool(keyword_pattern.search(formatted_line))
-                has_bracket_or_slash = ('(' in formatted_line and ')' in formatted_line) or ('/' in formatted_line)
                 
-                if (is_large_enough or is_keyword_matched or has_bracket_or_slash) and len(formatted_line) <= 150:
+                # [최종 조건] (글자 크기 기준 이상 AND 괄호 포함) OR (예산 키워드 조건)
+                is_valid_title = (is_large_enough and has_parentheses) or is_keyword_matched
+                
+                if is_valid_title and len(formatted_line) <= 150:
                     formatted_title = re.sub(r'^[ㆍ•■□▶-]\s*', '', formatted_line)
                     
                     if len(formatted_title) >= 2 and formatted_title not in visited_titles:
@@ -129,12 +134,12 @@ def parse_pdf_titles_hybrid(pdf_bytes, x_start, x_end, page_y_start, page_y_end,
 uploaded_file = st.file_uploader("PDF 파일 업로드", type=["pdf"])
 
 if uploaded_file is not None:
-    # 안전한 파일 바이트 추출
     pdf_bytes = uploaded_file.getvalue()
 
     st.sidebar.header("📏 1. 사업명 글자 크기(Font Size) 설정")
-    st.sidebar.caption("제목으로 간주할 글자 크기 기준을 정하세요.")
-    min_font_size = st.sidebar.slider("최소 글자 크기 (pt)", min_value=8.0, max_value=25.0, value=11.0, step=0.5)
+    st.sidebar.caption("제목으로 간주할 최소 글자 크기 기준을 정하세요.")
+    # 기본값을 20.0pt로 변경
+    min_font_size = st.sidebar.slider("최소 글자 크기 (pt)", min_value=8.0, max_value=35.0, value=20.0, step=0.5)
 
     st.sidebar.divider()
 
@@ -196,7 +201,7 @@ if uploaded_file is not None:
 
     if run_button or 'parsed_cache' in st.session_state:
         if run_button:
-            with st.spinner("하이브리드 조건(글자 크기 OR 키워드)으로 전체 분석 중입니다..."):
+            with st.spinner("20pt 이상 AND 괄호() 조건으로 전체 분석 중입니다..."):
                 st.session_state['parsed_cache'] = parse_pdf_titles_hybrid(
                     pdf_bytes, x_start_pct, x_end_pct, page_y_start, page_y_end, title_y_start, title_y_end, min_font_size
                 )
@@ -259,4 +264,4 @@ if uploaded_file is not None:
                     mime="text/plain"
                 )
         else:
-            st.error("조건에 맞는 사업명을 찾지 못했습니다. 슬라이더 값을 조금씩 조절해 보세요.")
+            st.error("조건에 맞는 사업명을 찾지 못했습니다. 사이드바의 글자 크기 슬라이더를 조절해 보세요.")
